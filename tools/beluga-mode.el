@@ -188,7 +188,7 @@ explicitly re-define the prefix key:
     (modify-syntax-entry ?\{ "(}2 b" st)
     (modify-syntax-entry ?\} "){3 b" st)
     (modify-syntax-entry ?\n ">" st)
-    (modify-syntax-entry ?/ "$/" st)
+    (modify-syntax-entry ?/ "." st)
     ;; For application of dependent arguments "exp A < ctx . term >", we'd want
     ;; <..> to match, but that breaks ->, <-, and other things.
     ;; (modify-syntax-entry ?< "(>" st)
@@ -971,7 +971,7 @@ Return the starting position of the short pragma; else, nil."
       (sdecl)
       (sdecls "," sdecls))
 
-     (dotted-type
+     (boxed-type
       (sdecls "|-" type)
       (sdecls "⊢" type))
 
@@ -1015,7 +1015,7 @@ Return the starting position of the short pragma; else, nil."
       ("FN" atom "⇒" exp)
       ("mlam" atom "=>" exp)
       ("mlam" atom "⇒" exp)
-      ("<" dotted-type ">")
+      ("[" boxed-type "]")
       ("case" exp "of" cases))
 
      (exps
