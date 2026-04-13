@@ -22,12 +22,18 @@ type timer =
   ; mutable stime_elapsed : float
   }
 
+let safe_times () =
+  try Unix.times ()
+  with _ ->
+    { Unix.tms_utime = 0.; tms_stime = 0.;
+      tms_cutime = 0.; tms_cstime = 0. }
+
 let timer (timer, f) =
   if !on || !onf then (
     let realtime_before = Unix.gettimeofday () in
-    let times_before = Unix.times () in
+    let times_before = safe_times () in
     let result = f () in
-    let times_after = Unix.times () in
+    let times_after = safe_times () in
     let realtime_after = Unix.gettimeofday () in
 
     timer.realtime_elapsed <-

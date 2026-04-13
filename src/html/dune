@@ -9,5 +9,6 @@
 ;; Install the stylesheet at `$(opam var share)/beluga/beluga.css`
 
 (install
+ (package beluga)
  (section share)
  (files beluga.css))

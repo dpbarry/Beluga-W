@@ -123,14 +123,9 @@ module PC = Printer.Control
        | ...
    ]} *)
 
-let ident_regexp = Str.regexp {|[^"].*|}
-
-(** [is_name_syntactically_valid name] is a heuristic for determining whether
-    [name] is syntactically valid. If that is not the case, then the name
-    must not have been user-defined, so it was generated during signature
-    reconstruction. *)
 let is_name_syntactically_valid name =
-  Str.string_match ident_regexp (Name.string_of_name name) 0
+  let s = Name.string_of_name name in
+  String.length s > 0 && s.[0] <> '"'
 
 (* Internal Syntax Pretty Printer Functor *)
 module Make (R : Store.Cid.RENDERER) : Printer.Int.T = struct

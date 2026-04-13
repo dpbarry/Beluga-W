@@ -400,6 +400,13 @@ struct
     state.last_load <- Option.some filename;
     sgn
 
+  let load_from_string state ~virtual_filename ~content =
+    let sgn =
+      Load.load_from_string state.load_state ~virtual_filename ~content
+    in
+    state.last_load <- Option.none;
+    sgn
+
   let reload state =
     match state.last_load with
     | Option.None -> raise_command_execution_error No_load_to_redo
@@ -927,7 +934,8 @@ module Interpreter_state =
     (Recsgn.Signature_reconstruction)
 module Interpreter = Make_interpreter (Interpreter_state)
 
-let create_initial_state () =
+let create_initial_state ?(ppf = Format.std_formatter) () =
+  Chatter.set_formatter ppf;
   let disambiguation_state =
     Parser.Disambiguation_state.create_initial_state ()
   in
@@ -937,7 +945,7 @@ let create_initial_state () =
       indexing_state
   in
   let state =
-    Interpreter_state.create_state Format.std_formatter disambiguation_state
+    Interpreter_state.create_state ppf disambiguation_state
       indexing_state signature_reconstruction_state
   in
   Interpreter.register_commands state;
@@ -952,3 +960,6 @@ let print_usage = Interpreter.print_usage
 let interpret_command state ~input = Interpreter.do_command state input
 
 let load state ~filename = Interpreter_state.load state ~filename
+
+let load_from_string state ~virtual_filename ~content =
+  Interpreter_state.load_from_string state ~virtual_filename ~content

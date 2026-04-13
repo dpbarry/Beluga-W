@@ -14,6 +14,12 @@ module type LOAD_STATE = sig
   val read_signature_file :
     state -> filename:String.t -> Synext.signature_file
 
+  val read_signature_from_string :
+    state ->
+    virtual_filename:String.t ->
+    content:String.t ->
+    Synext.signature_file
+
   val reconstruct_signature_file :
     state -> Synext.signature_file -> Synint.Sgn.sgn_file
 
@@ -66,6 +72,20 @@ struct
     Disambiguation.disambiguate_signature_file state.disambiguation_state
       signature_file
 
+  let read_signature_from_string state ~virtual_filename ~content =
+    let signature_file =
+      let initial_location = Location.initial virtual_filename in
+      let token_sequence = Lexer.lex_string ~initial_location content in
+      let parsing_state =
+        Parser_state.initial ~initial_location token_sequence
+      in
+      Parser.Parsing.eval_exn
+        Parser.Parsing.(only signature_file)
+        parsing_state
+    in
+    Disambiguation.disambiguate_signature_file state.disambiguation_state
+      signature_file
+
   let reconstruct_signature_file state signature =
     Signature_reconstruction.reconstruct_signature_file
       state.signature_reconstruction_state signature
@@ -79,6 +99,9 @@ module type LOAD = sig
   include Imperative_state.IMPERATIVE_STATE
 
   val load : state -> String.t -> String.t List.t * Synint.Sgn.sgn
+
+  val load_from_string :
+    state -> virtual_filename:String.t -> content:String.t -> Synint.Sgn.sgn
 end
 
 let read_signature_and_write_html filename =
@@ -193,6 +216,60 @@ module Make_load (Load_state : LOAD_STATE) = struct
       read_signature_and_write_html configuration_filename;
 
     (all_paths, signature')
+
+  let load_from_string state ~virtual_filename ~content =
+    Gensym.reset ();
+    Store.clear ();
+    Typeinfo.clear_all ();
+    Holes.clear ();
+    let sgn =
+      read_signature_from_string state ~virtual_filename ~content
+    in
+    Chatter.print 1 (fun ppf ->
+        Format.fprintf ppf "## Type Reconstruction begin: %s ##@\n"
+          virtual_filename);
+
+    let sgn' = reconstruct_signature_file state sgn in
+    let leftoverVars = get_leftover_vars state in
+
+    Chatter.print 2 (fun ppf ->
+        Format.fprintf ppf
+          "@[<v>## Internal syntax dump: %s ##@,@[<v>%a@]@]@\n"
+          virtual_filename
+          Prettyint.DefaultPrinter.fmt_ppr_sgn_file sgn');
+
+    Chatter.print 1 (fun ppf ->
+        Format.fprintf ppf "## Type Reconstruction done:  %s ##@\n"
+          virtual_filename);
+
+    Coverage.iter (function
+      | Coverage.Success -> ()
+      | Coverage.Failure message ->
+          if !Coverage.warningOnly then
+            Coverage.add_information
+              (Format.asprintf "WARNING: Cases didn't cover: %s" message)
+          else
+            raise
+              (Coverage.Error (Location.ghost, Coverage.NoCover message)));
+    if !Coverage.enableCoverage then
+      Chatter.print 2 (fun ppf ->
+          Format.fprintf ppf "## Coverage checking done: %s  ##@\n"
+            virtual_filename);
+
+    Logic.runLogic ();
+
+    (if Bool.not (Holes.none ()) then
+       let open Format in
+       Chatter.print 1 (fun ppf ->
+           Format.fprintf ppf "@[<v>## Holes: %s  ##@,@[<v>%a@]@]@\n"
+             virtual_filename
+             (pp_print_list Interactive.fmt_ppr_hole)
+             (Holes.list ())));
+
+    forbid_leftover_vars virtual_filename
+      (Option.from_predicate List.nonempty leftoverVars);
+    if !Monitor.on || !Monitor.onf then Monitor.print_timers ();
+    List1.singleton sgn'
 end
 
 module Load_state =
@@ -218,3 +295,18 @@ let load_fresh filename =
       indexing_state
   in
   load disambiguation_state signature_reconstruction_state filename
+
+let load_from_string_fresh ~virtual_filename ~content =
+  let disambiguation_state =
+    Parser.Disambiguation_state.create_initial_state ()
+  in
+  let indexing_state = Index_state.Indexing_state.create_initial_state () in
+  let signature_reconstruction_state =
+    Recsgn_state.Signature_reconstruction_state.create_initial_state
+      indexing_state
+  in
+  let state =
+    Load_state.create_state disambiguation_state
+      signature_reconstruction_state
+  in
+  Load.load_from_string state ~virtual_filename ~content

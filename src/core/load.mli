@@ -9,6 +9,12 @@ module type LOAD_STATE = sig
   val read_signature_file :
     state -> filename:String.t -> Synext.signature_file
 
+  val read_signature_from_string :
+    state ->
+    virtual_filename:String.t ->
+    content:String.t ->
+    Synext.signature_file
+
   val reconstruct_signature_file :
     state -> Synext.signature_file -> Synint.Sgn.sgn_file
 
@@ -39,6 +45,9 @@ module type LOAD = sig
   include Imperative_state.IMPERATIVE_STATE
 
   val load : state -> String.t -> String.t List.t * Synint.Sgn.sgn
+
+  val load_from_string :
+    state -> virtual_filename:String.t -> content:String.t -> Synint.Sgn.sgn
 end
 
 module Make_load (Load_state : LOAD_STATE) :
@@ -50,7 +59,7 @@ val load :
   -> string
   -> string list * Synint.Sgn.sgn
 
-(** [load_fresh filename] clears all internal state and loads the given path
-    to a [.cfg] or [.bel] file. The list of resolved paths (paths to [.bel]
-    files) is returned, along with the loaded signature. *)
 val load_fresh : string -> string list * Synint.Sgn.sgn
+
+val load_from_string_fresh :
+  virtual_filename:string -> content:string -> Synint.Sgn.sgn

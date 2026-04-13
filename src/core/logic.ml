@@ -33,6 +33,14 @@ module Options = struct
 
   (* Type check the proof terms. *)
   let checkProofs = ref true
+
+  
+  let more_solutions_prompt : (unit -> bool) ref = ref (fun () ->
+    Printf.printf "More? ";
+    match read_line () with
+    | "y" | "Y" | ";" -> true
+    | "q" | "Q" -> false
+    | _ -> false)
 end
 
 

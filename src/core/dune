@@ -8,7 +8,6 @@
   extlib
   support
   unix
-  str
   beluga_syntax
   beluga_parser
   beluga_html)
