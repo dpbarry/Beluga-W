@@ -17,6 +17,7 @@ let drain session =
 let create () =
   let buf = Buffer.create 4096 in
   let ppf = Format.formatter_of_buffer buf in
+  Error.disable_colored_output ();
   Logic.Options.more_solutions_prompt := (fun () -> false);
   Chatter.level := 1;
   let state = Command.create_initial_state ~ppf () in
@@ -27,7 +28,7 @@ let load_from_string session content =
     ignore
       (Command.load_from_string session.state ~virtual_filename:"input.bel"
          ~content : Synint.Sgn.sgn);
-    drain session
+    (drain session, true)
   with e ->
     let bt = Printexc.get_backtrace () in
     let msg =
@@ -35,7 +36,7 @@ let load_from_string session content =
       with _ -> Printexc.to_string e
     in
     Buffer.clear session.buf;
-    msg ^ "\n" ^ bt
+    (msg ^ "\n" ^ bt, false)
 
 let run_command session input =
   try
@@ -60,7 +61,10 @@ let () =
 
        method loadFromString content =
          let s = Js.to_string content in
-         Js.string (load_from_string !session s)
+         let trial = create () in
+         let (out, ok) = load_from_string trial s in
+         if ok then session := trial;
+         Js.string out
 
        method runCommand input =
          let s = Js.to_string input in
