@@ -18,6 +18,7 @@ let create () =
   let buf = Buffer.create 4096 in
   let ppf = Format.formatter_of_buffer buf in
   Error.disable_colored_output ();
+  Logic.Options.output_formatter := ppf;
   Logic.Options.more_solutions_prompt := (fun () -> false);
   Chatter.level := 1;
   let state = Command.create_initial_state ~ppf () in
