@@ -250,7 +250,7 @@ module Make_schema_precedence (S : PRECEDENCE_STATE) :
   SCHEMA_PRECEDENCE with type state = S.state = struct
   include S
 
-  type precedence = Static of Int.t [@unboxed]
+  type precedence = Static of Int.t
 
   let precedence_of_schema _state = function
     | Meta.Schema.Alternation _ -> Static 1

@@ -1,4 +1,4 @@
-type 'a t = T of 'a * 'a * 'a list [@unboxed]
+type 'a t = T of 'a * 'a * 'a list
 
 let[@inline] from x1 x2 xs = T (x1, x2, xs)
 

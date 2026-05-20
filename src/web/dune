@@ -1,5 +1,6 @@
 (executable
  (name beluga_web)
+ (modules beluga_web)
  (modes js)
  (libraries
   js_of_ocaml
@@ -8,7 +9,28 @@
   beluga_syntax
   beluga_parser)
  (js_of_ocaml
-  (flags (:standard --disable use-js-string)))
+  (flags (:standard --disable use-js-string --effects=cps)))
+ (flags (:standard -w -53))
+ (preprocess
+  (pps js_of_ocaml-ppx)))
+
+(rule
+ (target beluga_web_dt.ml)
+ (deps beluga_web.ml)
+ (action (copy %{deps} %{target})))
+
+(executable
+ (name beluga_web_dt)
+ (modules beluga_web_dt)
+ (modes js)
+ (libraries
+  js_of_ocaml
+  support
+  beluga
+  beluga_syntax
+  beluga_parser)
+ (js_of_ocaml
+  (flags (:standard --disable use-js-string --effects=double-translation)))
  (flags (:standard -w -53))
  (preprocess
   (pps js_of_ocaml-ppx)))
