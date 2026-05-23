@@ -9,6 +9,14 @@ type session =
   ; scan_pos : int ref
   }
 
+let fingerprint_content s =
+  let hash = ref 0x811c9dc5l in
+  for i = 0 to String.length s - 1 do
+    hash := Int32.logxor !hash (Int32.of_int (Char.code s.[i]));
+    hash := Int32.mul !hash 0x01000193l
+  done;
+  Printf.sprintf "%d:%08lx" (String.length s) !hash
+
 let ends_with s suffix =
   let ls = String.length s and lf = String.length suffix in
   ls >= lf && String.sub s (ls - lf) lf = suffix
@@ -125,27 +133,54 @@ let run_command session input =
     session.scan_pos := 0;
     msg
 
+let make_check_result ~output ~ok =
+  object%js
+    val output = Js.string output
+    val ok = Js.bool ok
+  end
+
+let make_load_result ~output ~ok ~fingerprint =
+  object%js
+    val output = Js.string output
+    val ok = Js.bool ok
+    val fingerprint = Js.string fingerprint
+  end
+
 let () =
   Printexc.record_backtrace true;
   let session = ref (create ()) in
+  let committed_fingerprint = ref "" in
   Js.export "Beluga"
     (object%js
        method create =
-         session := create ();
-         Js.string "Beluga session created."
+          session := create ();
+          committed_fingerprint := "";
+          Js.string "Beluga session created."
+
+       method checkFromString content =
+          let s = Js.to_string content in
+          let trial = create () in
+          let (out, ok) = load_from_string trial s in
+          make_check_result ~output:out ~ok
 
        method loadFromString content =
-         let s = Js.to_string content in
-         let trial = create () in
-         let (out, ok) = load_from_string trial s in
-         if ok then session := trial;
-         Js.string out
+          let s = Js.to_string content in
+          let trial = create () in
+          let (out, ok) = load_from_string trial s in
+          if ok then (
+            session := trial;
+            committed_fingerprint := fingerprint_content s);
+          make_load_result ~output:out ~ok ~fingerprint:!committed_fingerprint
 
        method runCommand input =
-         let s = Js.to_string input in
-         Js.string (run_command !session s)
+          let s = Js.to_string input in
+          Js.string (run_command !session s)
+
+       method getCommittedFingerprint =
+          Js.string !committed_fingerprint
 
        method reset =
-         session := create ();
-         Js.string "Session reset."
+          session := create ();
+          committed_fingerprint := "";
+          Js.string "Session reset."
     end)
