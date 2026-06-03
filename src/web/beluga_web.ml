@@ -101,11 +101,20 @@ let normalize_exn e =
 let load_from_string session content =
   session.scan_pos := 0;
   Buffer.clear session.buf;
+  Coverage.reset_information ();
   try
     ignore
       (Command.load_from_string session.state ~virtual_filename:"input.bel"
          ~content : Synint.Sgn.sgn);
-    (drain session, true)
+    let main_out = drain session in
+    let warnings = Coverage.get_information () in
+    Coverage.reset_information ();
+    let combined =
+      if String.length warnings = 0 then main_out
+      else if String.length main_out = 0 then warnings
+      else main_out ^ "\n" ^ warnings
+    in
+    (combined, true)
   with e ->
     let e = normalize_exn e in
     let bt = Printexc.get_backtrace () in
@@ -115,14 +124,18 @@ let load_from_string session content =
     in
     Buffer.clear session.buf;
     session.scan_pos := 0;
+    Coverage.reset_information ();
     (msg ^ "\n" ^ bt, false)
 
-let run_command session input =
+(* Like run_command but also reports whether the command ran without raising,
+   so JSON wrappers can distinguish a real result from an error message that
+   was interpreted and returned in the same channel. *)
+let run_command_status session input =
   session.scan_pos := 0;
   Buffer.clear session.buf;
   try
     Command.interpret_command session.state ~input;
-    drain session
+    (drain session, true)
   with e ->
     let e = normalize_exn e in
     let msg =
@@ -131,7 +144,121 @@ let run_command session input =
     in
     Buffer.clear session.buf;
     session.scan_pos := 0;
-    msg
+    (msg, false)
+
+let run_command session input = fst (run_command_status session input)
+
+(* ----- IDE JSON helpers (Semantic Engine V2 oracle) -----------------------
+   These wrap EXISTING interpreter commands (e.g. %:get-type) and emit a small
+   JSON envelope so the JS-side engine gets structured {ok,type} data instead
+   of parsing free-form text. No core command is added or modified. *)
+
+let json_escape s =
+  let b = Buffer.create (String.length s + 2) in
+  String.iter
+    (fun c ->
+       match c with
+       | '"' -> Buffer.add_string b "\\\""
+       | '\\' -> Buffer.add_string b "\\\\"
+       | '\n' -> Buffer.add_string b "\\n"
+       | '\r' -> Buffer.add_string b "\\r"
+       | '\t' -> Buffer.add_string b "\\t"
+       | c when Char.code c < 0x20 ->
+         Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+       | c -> Buffer.add_char b c)
+    s;
+  Buffer.contents b
+
+let contains_sub s sub =
+  let ls = String.length s and lsub = String.length sub in
+  if lsub = 0 then true
+  else if lsub > ls then false
+  else
+    let rec aux i =
+      if i > ls - lsub then false
+      else if String.sub s i lsub = sub then true
+      else aux (i + 1)
+    in
+    aux 0
+
+let rstrip_type s =
+  (* Drop trailing whitespace and ';' the way the JS parser does. *)
+  let n = ref (String.length s) in
+  while !n > 0 &&
+        (match s.[!n - 1] with ' ' | '\t' | '\n' | '\r' | ';' -> true | _ -> false)
+  do decr n done;
+  String.sub s 0 !n
+
+(* Mirror live-intel's parseTypeResponse: only forward a response that looks
+   like a real type/kind, rejecting Beluga's error / "no info" strings that
+   arrive on the same channel. Returns the cleaned type, or None. *)
+let valid_type_response raw =
+  let text = rstrip_type (String.trim raw) in
+  if String.length text = 0 then None
+  else if text.[0] = '-' then None
+  else
+    let low = String.lowercase_ascii text in
+    let starts p = String.length low >= String.length p && String.sub low 0 (String.length p) = p in
+    if starts "no " || starts "error" then None
+    else
+      let bad =
+        [ "ill-formed"; "ill formed"; "unbound"; "unrecognized"
+        ; "cannot"; "no type"; "not defined"; "not found" ]
+      in
+      if List.exists (contains_sub low) bad then None else Some text
+
+let type_at_json session line col =
+  let cmd = Printf.sprintf "%%:get-type %d %d" line col in
+  let (raw, ran) = run_command_status session cmd in
+  let t = if ran then valid_type_response raw else None in
+  let ok = match t with Some _ -> true | None -> false in
+  let type_field =
+    match t with None -> "null" | Some ty -> "\"" ^ json_escape ty ^ "\""
+  in
+  Printf.sprintf "{\"ok\":%b,\"type\":%s,\"raw\":\"%s\"}" ok type_field (json_escape raw)
+
+let command_json session input =
+  let (raw, ran) = run_command_status session input in
+  Printf.sprintf "{\"ok\":%b,\"output\":\"%s\"}" ran (json_escape raw)
+
+(* JS passes implicit use-sites as "name|line|col;..." (1-based line, 0-based col). *)
+let parse_position_triples spec =
+  if String.length spec = 0 then []
+  else
+    List.filter_map
+      (fun part ->
+         let bits = String.split_on_char '|' part in
+         match bits with
+         | [ name; ls; cs ] -> (
+             try Some (name, int_of_string ls, int_of_string cs)
+             with _ -> None)
+         | _ -> None)
+      (String.split_on_char ';' spec)
+
+let implicit_entry_json name line col ty =
+  Printf.sprintf "{\"name\":\"%s\",\"line\":%d,\"col\":%d,\"type\":\"%s\"}"
+    (json_escape name) line col (json_escape ty)
+
+let elaborate_decl_json session positions_spec =
+  let positions = parse_position_triples positions_spec in
+  if positions = [] then
+    "{\"ok\":false,\"reason\":\"no-positions\",\"fallback\":\"use-ideTypeAtJson\"}"
+  else
+    let entries = ref [] in
+    List.iter
+      (fun (name, line, col) ->
+         let cmd = Printf.sprintf "%%:get-type %d %d" line col in
+         let raw, ran = run_command_status session cmd in
+         let t = if ran then valid_type_response raw else None in
+         match t with
+         | Some ty -> entries := implicit_entry_json name line col ty :: !entries
+         | None -> ())
+      positions;
+    if !entries = [] then
+      "{\"ok\":false,\"reason\":\"no-types\",\"implicits\":[]}"
+    else
+      Printf.sprintf "{\"ok\":true,\"implicits\":[%s],\"metavars\":[],\"diagnostics\":[]}"
+        (String.concat "," (List.rev !entries))
 
 let make_check_result ~output ~ok =
   object%js
@@ -176,8 +303,28 @@ let () =
           let s = Js.to_string input in
           Js.string (run_command !session s)
 
+       (* Semantic Engine V2 oracle: per-declaration type as a JSON envelope
+          {ok, type, raw}, computed against the currently loaded session via
+          the existing %:get-type command. Line/col are 1-based, matching
+          live-intel's runGetType. *)
+       method ideTypeAtJson line col =
+          Js.string (type_at_json !session line col)
+
+       (* Generic JSON wrapper over any interpreter command: {ok, output}.
+          `ok` reflects whether the command ran without raising. *)
+       method ideCommandJson input =
+          let s = Js.to_string input in
+          Js.string (command_json !session s)
+
        method getCommittedFingerprint =
           Js.string !committed_fingerprint
+
+       (* Batch elaboration: runs %:get-type at each JS-supplied use-site in one
+          WASM call. Tier B (upstream %:elaborate-decl / Typeinfo walk) can replace
+          the internal loop when available in Beluga core. *)
+       method ideElaborateDecl _start_line _end_line positions_spec =
+          let spec = Js.to_string positions_spec in
+          Js.string (elaborate_decl_json !session spec)
 
        method reset =
           session := create ();
