@@ -2,6 +2,8 @@ open Js_of_ocaml
 open Beluga
 open Beluga_syntax.Syncom
 
+module P = Prettyint.DefaultPrinter
+
 type session =
   { state : Command.state
   ; buf : Buffer.t
@@ -217,6 +219,82 @@ let type_at_json session line col =
   in
   Printf.sprintf "{\"ok\":%b,\"type\":%s,\"raw\":\"%s\"}" ok type_field (json_escape raw)
 
+(* Decl-level reconstructed type. Looks up a top-level declaration by NAME in the
+   global store (populated by the last successful load) and pretty-prints its
+   elaborated type with implicit arguments expanded. Returns {ok,type}.
+   Search order: comp program (rec) -> comp constructor -> LF type family kind ->
+   LF term constructor, so the primary "rec name" case wins on collisions. LF term
+   constructors are reached by walking each type family's constructor list (the
+   Term store has no global enumeration, but Typ.Entry.constructors lists them). *)
+let decl_type_json requested =
+  let open Synint in
+  let matches (n : Name.t) = Name.string_of_name n = requested in
+  let fmt pp x =
+    let out = ref "" in
+    Printer.with_implicits true (fun () -> out := Format.asprintf "%a" pp x);
+    !out
+  in
+  (* Find an LF term constructor by name across all type families. *)
+  let find_lf_term () =
+    List.fold_left
+      (fun acc (_, tentry) ->
+         match acc with
+         | Some _ -> acc
+         | None ->
+           List.fold_left
+             (fun acc cid ->
+                match acc with
+                | Some _ -> acc
+                | None ->
+                  let e = Store.Cid.Term.get cid in
+                  if matches e.Store.Cid.Term.Entry.name then Some e else None)
+             None
+             !(tentry.Store.Cid.Typ.Entry.constructors))
+      None
+      (Store.Cid.Typ.current_entries ())
+  in
+  let found =
+    try
+      match
+        List.find_opt
+          (fun (_, e) -> matches e.Store.Cid.Comp.Entry.name)
+          (Store.Cid.Comp.current_entries ())
+      with
+      | Some (_, e) ->
+        Some (fmt (P.fmt_ppr_cmp_typ LF.Empty P.l0) e.Store.Cid.Comp.Entry.typ)
+      | None -> (
+        match
+          List.find_opt
+            (fun (_, e) -> matches e.Store.Cid.CompConst.Entry.name)
+            (Store.Cid.CompConst.current_entries ())
+        with
+        | Some (_, e) ->
+          Some
+            (fmt (P.fmt_ppr_cmp_typ LF.Empty P.l0)
+               e.Store.Cid.CompConst.Entry.typ)
+        | None -> (
+          match
+            List.find_opt
+              (fun (_, e) -> matches e.Store.Cid.Typ.Entry.name)
+              (Store.Cid.Typ.current_entries ())
+          with
+          | Some (_, e) ->
+            Some
+              (fmt (P.fmt_ppr_lf_kind LF.Null P.l0) e.Store.Cid.Typ.Entry.kind)
+          | None -> (
+            match find_lf_term () with
+            | Some e ->
+              Some
+                (fmt
+                   (P.fmt_ppr_lf_typ LF.Empty LF.Null P.l0)
+                   e.Store.Cid.Term.Entry.typ)
+            | None -> None)))
+    with _ -> None
+  in
+  match found with
+  | Some ty -> Printf.sprintf "{\"ok\":true,\"type\":\"%s\"}" (json_escape ty)
+  | None -> "{\"ok\":false,\"type\":null}"
+
 let command_json session input =
   let (raw, ran) = run_command_status session input in
   Printf.sprintf "{\"ok\":%b,\"output\":\"%s\"}" ran (json_escape raw)
@@ -309,6 +387,11 @@ let () =
           live-intel's runGetType. *)
        method ideTypeAtJson line col =
           Js.string (type_at_json !session line col)
+
+       (* Decl-level reconstructed type for NAME, with implicits expanded:
+          {ok, type}. Reads the global store from the last committed load. *)
+       method ideDeclType name =
+          Js.string (decl_type_json (Js.to_string name))
 
        (* Generic JSON wrapper over any interpreter command: {ok, output}.
           `ok` reflects whether the command ran without raising. *)
