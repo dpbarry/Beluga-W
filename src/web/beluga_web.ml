@@ -89,6 +89,7 @@ let create () =
   let ppf = make_progress_formatter buf scan_pos in
   Error.disable_colored_output ();
   Logic.Options.more_solutions_prompt := (fun () -> false);
+  Logic.Options.output_formatter := ppf;
   Chatter.level := 1;
   let state = Command.create_initial_state ~ppf () in
   { state; buf; ppf; scan_pos }

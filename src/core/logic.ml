@@ -41,6 +41,9 @@ module Options = struct
     | "y" | "Y" | ";" -> true
     | "q" | "Q" -> false
     | _ -> false)
+
+  (* Formatter for query output; override in non-CLI contexts (e.g. beluga_web). *)
+  let output_formatter : Format.formatter ref = ref Format.std_formatter
 end
 
 
@@ -1163,20 +1166,20 @@ module Printer = struct
      Return string representation of existential variable
      instantiations in the query.
    *)
-  let fmt_ppr_inst ppf =
+  let fmt_ppr_inst cPsi ppf =
     function
-    | [] -> fprintf ppf "^."
+    | [] -> ()
     | xs ->
-       fprintf ppf "@[<v>%a@]."
-         (pp_print_list ~pp_sep: pp_print_cut
+       fprintf ppf "@[<v>%a@]"
+         (pp_print_list ~pp_sep:pp_print_cut
             (fun ppf (x, tA) ->
               fprintf ppf "%a = %a;"
                 Name.pp x
-                (fmt_ppr_normal LF.Empty LF.Null) (tA, S.id)))
+                (fmt_ppr_normal LF.Empty cPsi) (tA, S.id)))
          xs
 
   let printQuery q =
-    fprintf std_formatter "%a.@\n@\n"
+    fprintf !Options.output_formatter "%a.@\n@\n"
       fmt_ppr_sgn_query q
 
   (* Prints all LF signatures *)
@@ -5662,13 +5665,20 @@ module Frontend = struct
            end
 
   (* moreSolutions () = () *)
-  let moreSolutions () =
-    printf "More? ";
-    match read_line () with
-    | "y" | "Y" | ";" -> true
-    | "q" | "Q" ->
-       abort (fun ppf () -> fprintf ppf "Query error -- explicit quit.")
-    | _ -> false
+  let moreSolutions () = !Options.more_solutions_prompt ()
+
+  (* finishAbortedSearch q n reason = ()
+     Search stopped before completing (depth limit, etc.). If the solution
+     count already satisfies the bound, treat as success; otherwise report
+     incomplete search rather than a count mismatch. *)
+  let finishAbortedSearch sgnQuery n reason =
+    if boundEq (lowerBound sgnQuery.expected sgnQuery.tries) (Some n)
+    then fprintf !Options.output_formatter "Done.@\n"
+    else
+      fprintf !Options.output_formatter
+        "Query error: Search incomplete -- %s \
+         (found %d solution(s); search did not finish).@.\n"
+        reason n
 
   (* solve q = () *)
   let solve sgnQuery =
@@ -5687,27 +5697,31 @@ module Frontend = struct
     let scInit (cPsi, tM) =
       incr solutions;
 
+      (* Print witness before optional proof checking — harvest queries may
+         fail check while still yielding a useful witness. *)
+      if !Options.chatter >= 1
+      then
+        begin
+          let print_inst = P.fmt_ppr_inst cPsi in
+          fprintf !Options.output_formatter
+            "@[<v>---------- Solution %d ----------@,"
+            (!solutions);
+          begin match sgnQuery.optName with
+          | Some n ->
+             fprintf !Options.output_formatter "@,%a@,"
+               print_inst [(n, tM)]
+          | None -> ()
+          end;
+          if sgnQuery.instMVars <> []
+          then
+            fprintf !Options.output_formatter "@,%a@,"
+              print_inst sgnQuery.instMVars;
+          fprintf !Options.output_formatter "@]@,\n@\n"
+        end;
+
       (* Rebuild the substitution and type check the proof term. *)
       if !Options.checkProofs
       then check cPsi tM (Convert.solToSub sgnQuery.instMVars); (* !querySub *)
-
-      (* Print MVar instantiations. *)
-      if !Options.chatter >= 3
-      then
-        begin
-          fprintf std_formatter "@[<v>---------- Solution %d ----------@,[%a]@,%a@,@]"
-            (!solutions)
-            (P.fmt_ppr_dctx LF.Empty) cPsi
-            P.fmt_ppr_inst sgnQuery.instMVars;
-          (* Print proof term. *)
-          begin match sgnQuery.optName with
-          | Some n ->
-             fprintf std_formatter "%a@\n"
-               P.fmt_ppr_inst [(n, tM)]
-          | None -> ()
-          end;
-          fprintf std_formatter "@\n"
-        end;
       (* Interactive. *)
       if !Options.askSolution && not (moreSolutions ())
       then raise Done;
@@ -5727,25 +5741,26 @@ module Frontend = struct
           (* Check solution bounds. *)
           checkSolutions sgnQuery.expected sgnQuery.tries !solutions
         with
-        | Done -> printf "Done.\n"
-        | AbortQuery s -> printf "%s\n" s
+        | Done -> fprintf !Options.output_formatter "Done.@\n"
+        | AbortQuery s -> fprintf !Options.output_formatter "%s@.\n" s
         | Solver.End_Of_Search ->
            (if (boundEq (lowerBound sgnQuery.expected sgnQuery.tries) (Some !solutions))
             then
-              printf "Done.\n"
+              fprintf !Options.output_formatter "Done.@\n"
             else
-              begin
-               printf
+              fprintf !Options.output_formatter
                "Query error: Wrong number of solutions -- \
                 expected %a in %a tries, but found %d. @\n \n"
                P.fmt_ppr_bound sgnQuery.expected
                P.fmt_ppr_bound sgnQuery.tries
-               !solutions
-              end)
-        | _ -> ()
+               !solutions)
+        | Solver.DepthReached _ ->
+           finishAbortedSearch sgnQuery !solutions "depth limit reached"
+        | _ ->
+           finishAbortedSearch sgnQuery !solutions "solver stopped early"
       end
     else if !Options.chatter >= 2
-    then printf "Skipping query -- bound for tries = 0. @\n"
+    then fprintf !Options.output_formatter "Skipping query -- bound for tries = 0. @\n"
 
   (* Used when the auto-invert-solve and inductive-auto-solve tactics are
      called from Harpoon *)

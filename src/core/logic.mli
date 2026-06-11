@@ -10,6 +10,7 @@ type comp_res
 module Options : sig
   val enableLogic : bool ref
   val more_solutions_prompt : (unit -> bool) ref
+  val output_formatter : Format.formatter ref
 end
 
 module Convert : sig
