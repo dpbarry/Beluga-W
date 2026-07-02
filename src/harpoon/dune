@@ -1,12 +1,48 @@
+; harpoon_core: the proof-engine core, separated from the terminal driver so it
+; can link in the js_of_ocaml web build (BelJar's Proof Lab drives these tactics).
+; No terminal deps (linenoise/optparser/Io/Repl), no file I/O. (wrapped false) is
+; required so the driver's bare Tactic./Theorem. references resolve across the lib
+; boundary. See memory: reference-harpoon-core-linkable.
+(library
+ (name harpoon_core)
+ (package beluga)
+ (wrapped false)
+ (modules
+  tactic
+  translate
+  automation
+  theorem
+  cidProgRewrite
+  revisit
+  web_recover)
+ (libraries
+  support
+  beluga
+  beluga_syntax
+  beluga_parser)
+ (instrumentation
+  (backend bisect_ppx --bisect-silent yes)))
+
 (library
  (name harpoon)
  (package beluga)
- (modules :standard \ main)
+ (modules
+  :standard
+  \
+  main
+  tactic
+  translate
+  automation
+  theorem
+  cidProgRewrite
+  revisit
+  web_recover)
  (libraries
   sedlex
   linenoise
   support
   optparser
+  harpoon_core
   beluga
   beluga_syntax
   beluga_parser
@@ -25,6 +61,7 @@
   support
   optparser
   harpoon
+  harpoon_core
   beluga
   beluga_syntax
   beluga_parser
