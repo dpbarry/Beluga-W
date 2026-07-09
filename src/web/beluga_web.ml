@@ -105,6 +105,12 @@ let load_from_string session content =
   session.scan_pos := 0;
   Buffer.clear session.buf;
   Coverage.reset_information ();
+  (* The GLOBAL unification constraint store survives a failed check (a
+     reconstruction that ends in "constraints could not be solved" leaves them
+     trailed), and the NEXT load on this instance then dies with [Not_found] —
+     a poisoned session. Core resets it at comparable entry points
+     (command.ml, interactive.ml); do the same per load. *)
+  Unify.StdTrail.resetGlobalCnstrs ();
   try
     ignore
       (Command.load_from_string session.state ~virtual_filename:"input.bel"
