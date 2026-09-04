@@ -89,6 +89,21 @@ module type INTERPRETER_STATE = sig
   val read_comp_expression_and_infer_type :
     state -> ?location:Location.t -> String.t -> Comp.exp * Comp.typ
 
+  (** BelJar: elaborate an expression against a goal type IN A HOLE'S OWN CONTEXT,
+      returning the subgoals the elaboration creates. Unlike
+      [read_comp_expression_and_infer_type], which elaborates in the EMPTY context, this
+      brings the hole's meta- and computation-variables into scope, so an INCOMPLETE term
+      (holes in argument positions) can be typed without decl-level reconstruction
+      rejecting it. *)
+  val elaborate_in_hole :
+       state
+    -> ?location:Location.t
+    -> LF.mctx
+    -> Comp.gctx
+    -> Comp.typ * LF.msub
+    -> String.t
+    -> (HoleId.t * Holes.some_hole) list
+
   val read_checked_query :
        state
     -> ?location:Location.t
@@ -244,6 +259,26 @@ struct
       with_bindings_checkpoint state (fun state ->
           disambiguate_comp_expression state exp))
 
+  (* BelJar: the PARSE half of `read_comp_expression_and_infer_type`, factored out so an
+     expression can be indexed in a HOLE's context rather than the empty one. Purely a
+     refactor: the original function below now calls it and behaves identically. *)
+  let parse_comp_expression state ?(location = Location.ghost) input =
+    run_safe (fun () ->
+        let token_sequence =
+          Lexer.lex_string ~initial_location:location input
+        in
+        let parsing_state =
+          Parser_state.initial ~initial_location:location token_sequence
+        in
+        let parser_state =
+          Parser.make_state ~parser_state:parsing_state
+            ~disambiguation_state:state.disambiguation_state
+        in
+        Parser.eval
+          (Parser.parse_and_disambiguate ~parser:comp_expression_parser
+             ~disambiguator:comp_expression_disambiguator)
+          parser_state)
+
   let read_comp_expression_and_infer_type state ?(location = Location.ghost)
       input =
     let apx_exp =
@@ -275,6 +310,36 @@ struct
     let exp, ttau = Reconstruct.elExp' LF.Empty LF.Empty apx_exp in
     let tau = Whnf.cnormCTyp ttau in
     (exp, tau)
+
+  (* BelJar: see the signature. Local scoping is done exactly as Harpoon does it
+     (src/harpoon/prover.ml `elaborate_checkable_expression`): add the hole's cD and cG
+     under a bindings checkpoint, index, then elaborate against the goal. `Holes.catch`
+     collects the holes the elaboration introduces, which are the SUBGOALS. *)
+  let elaborate_in_hole state ?(location = Location.ghost) cD cG ttau input =
+    let exp = parse_comp_expression state ~location input in
+    let hs, _e =
+      Holes.catch (fun () ->
+          let apx_exp =
+            Indexing_state.with_bindings_checkpoint state.index_state
+              (fun ist ->
+                Indexing_state.add_all_mctx ist cD;
+                Indexing_state.add_all_gctx ist cG;
+                Indexer.index_comp_expression ist exp)
+          in
+          let e = Reconstruct.elExp cD cG apx_exp (Pair.map_left Total.strip ttau) in
+          (* ⛔ THE SUBGOALS ARE ASSIGNED BY `Check.Comp.check`, NOT BY ELABORATION.
+             `Reconstruct.elExp` only calls `Holes.allocate` at an `Apx.Comp.Hole`
+             (reconstruct.ml ~1149): it reserves an ID and builds `Int.Comp.Hole`, but
+             never `Holes.assign`s the context and goal. `Check.Comp.check` does that
+             (check.ml ~1076). Without this call `Holes.catch` returns [] and every
+             incomplete term reports "OK 0" with no subgoals. Harpoon's
+             `elaborate_checkable_expression` checks for the same reason.
+             `mcid = None` and `mfs = []`: there is no enclosing theorem being checked
+             here, so no totality obligations apply to a hypothetical term. *)
+          let e = Whnf.cnormExp (e, Whnf.m_id) in
+          Check.Comp.check Option.none cD cG [] e ttau)
+    in
+    hs
 
   let query_parser =
     Parser.Parsing.(
@@ -895,6 +960,96 @@ module Make_interpreter (State : INTERPRETER_STATE) = struct
     fprintf state "Usage: \n";
     print_helpme state
 
+  (* ── BelJar: type an INCOMPLETE expression in a hole's own context ──────────
+     Motivation (BelJar prover master plan, entries 62c/64). At decl level Beluga
+     refuses a partially-applied term whose implicit arguments are undetermined
+     ("Leftover meta-variables ...; provide a type annotation"), and the annotation it
+     asks for cannot be written, because the hole report prints types using
+     reconstruction-invented names that have no source binding. That round trip through
+     printed syntax is the obstruction, not the type theory.
+
+     This command bypasses the round trip: it elaborates EXPR directly against hole H's
+     own goal type, in H's own cD/cG, and reports the SUBGOALS the elaboration creates.
+     No printing of the goal, no re-parsing, no namespace problem.
+
+     Local variables are brought into scope exactly as Harpoon does it
+     (src/harpoon/prover.ml: add_all_mctx / add_all_gctx under a bindings checkpoint),
+     and `Holes.catch` collects the holes the elaboration introduces. Purely additive:
+     no existing command or code path is touched. *)
+  let checkinhole =
+    make_command ~name:"checkinhole" ~usage:"checkinhole H EXPR"
+      ~description:
+        "Elaborate EXPR against hole H's goal in H's own context, reporting the \
+         subgoals it creates. Types INCOMPLETE terms (holes allowed in argument \
+         positions), which decl-level reconstruction rejects."
+        (* Takes the RAW input, as `query` does. `command2` tokenises on spaces, so a
+           multi-token expression arrives as N arguments and the dispatcher's arity check
+           rejects it ("Command requires 2 arguments, but 4 were given"). Only the FIRST
+           token is the hole strategy; everything after it is the expression. *)
+      ~run:
+        (fun state ~input ->
+          let input = String.trim input in
+          let i =
+            match String.index_opt input ' ' with
+            | Option.Some i -> i
+            | Option.None -> String.length input
+          in
+          let strat_s = String.sub input 0 i in
+          let expr_s =
+            String.trim (String.sub input i (String.length input - i))
+          in
+          if String.length expr_s = 0 then
+            fprintf state "- Usage: checkinhole H EXPR;"
+          else
+            with_hole_from_strategy_string state strat_s
+              (requiring_computation_hole state (fun (_i, h) ->
+                    let Holes.{ cD; info = { Holes.cG; compGoal; _ }; _ } = h in
+                    match
+                      State.elaborate_in_hole state cD cG compGoal expr_s
+                    with
+                    | hs ->
+                        fprintf state "OK %d;" (List.length hs);
+                        List.iter
+                          (fun (_id, hole) ->
+                            match Holes.to_comp_hole hole with
+                            | Option.Some hh ->
+                                let Holes.
+                                      { cD = cD'
+                                      ; info = { Holes.compGoal = g, _; _ }
+                                      ; _
+                                      } =
+                                  hh
+                                in
+                                fprintf state "@\nSUBGOAL %a;"
+                                  (P.fmt_ppr_cmp_typ cD' P.l0)
+                                  g
+                            | Option.None -> (
+                                (* An LF subgoal (a hole inside a box): print its type in
+                                   its own LF context, else the caller gets a bare marker
+                                   and half the refinement's information is lost. *)
+                                match Holes.to_lf_hole hole with
+                                | Option.Some lh ->
+                                    let Holes.
+                                          { cD = cD'
+                                          ; info =
+                                              { Holes.lfGoal = tA, _
+                                              ; Holes.cPsi
+                                              ; _
+                                              }
+                                          ; _
+                                          } =
+                                      lh
+                                    in
+                                    fprintf state "@\nSUBGOAL-LF [%a |- %a];"
+                                      (P.fmt_ppr_lf_dctx cD' P.l0)
+                                      cPsi
+                                      (P.fmt_ppr_lf_typ cD' cPsi P.l0)
+                                      tA
+                                | Option.None -> fprintf state "@\nSUBGOAL-?;"))
+                          hs
+                    | exception e ->
+                        fprintf state "FAIL %s;" (Printexc.to_string e))))
+
   let commands =
     [ helpme
     ; chatteroff
@@ -919,6 +1074,7 @@ module Make_interpreter (State : INTERPRETER_STATE) = struct
     ; lookup_hole
     ; solvelfhole
     ; print_type
+    ; checkinhole
     ]
 
   let register_commands state = List.iter (register_command state) commands

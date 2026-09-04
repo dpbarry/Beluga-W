@@ -226,6 +226,114 @@ let type_at_json session line col =
   in
   Printf.sprintf "{\"ok\":%b,\"type\":%s,\"raw\":\"%s\"}" ok type_field (json_escape raw)
 
+(* ----- THE BASELINE: HARPOON'S OWN AUTOMATION ------------------------------
+   Orca has never once been measured against the thing it is supposed to beat.
+   Harpoon has four automations: `auto_intros`, `auto_solve_trivial` (an exact
+   hypothesis/goal match — the axiom rule and nothing more), and the two real ones,
+   `--auto-invert-solve d` and `--inductive-auto-solve d`, which run Beluga's
+   logic-programming solver at the COMPUTATION level with the induction hypotheses in
+   scope (`Logic.Frontend.msolve_tactic`, depth-bounded).
+
+   ⭐ Entry 63 only ever tested `logic.ml` at the LF level via `%:solve-lf-hole`. This is
+   a different and much stronger thing, and it is the honest baseline.
+
+   Reachable here because `harpoon_core` is already a library of the web build and
+   `Web_recover` exists precisely to hand us a real `Theorem.t` + `proof_state` from an
+   ordinary signature load. The body below mirrors `Prover.Auto_invert_solve` /
+   `Inductive_auto_solve` (src/harpoon/prover.ml) with `variant` selecting between them
+   (1 = invert, 2 = inductive), and the mutual-decl list taken from the store since
+   Web_recover deliberately does not reconstruct mutual grouping.
+
+   ⛔ No core file is touched; this is the same shim-only pattern as `ideAdjudicate`. *)
+let harpoon_auto_json depth variant =
+  let buf = Buffer.create 256 in
+  let ppf = Format.formatter_of_buffer buf in
+  try
+    let thms = Web_recover.recover_theorems ppf in
+    match Web_recover.all_subgoals thms with
+    | [] -> "{\"ok\":false,\"reason\":\"no-subgoals\"}"
+    | { Web_recover.theorem = t; proof_state = g } :: _ ->
+        let open Beluga_syntax.Synint in
+        let Comp.{ cD; cG; cIH } = g.Comp.context in
+        let (tau0, ms) = g.Comp.goal in
+        let tau = Whnf.cnormCTyp (tau0, ms) in
+        let (mquery, _, _, instMMVars) =
+          let (typ', k') = Abstract.comptyp tau in
+          Logic.Convert.comptypToMQuery (typ', k')
+        in
+        let (theorem, _) = Theorem.get_statement t in
+        let cid = Theorem.get_cid t in
+        let mfs =
+          try [ Store.Cid.Comp.get_total_decl cid ] with _ -> []
+        in
+        let witness =
+          try
+            Logic.Frontend.msolve_tactic (cD, cG, cIH)
+              (mquery, tau, instMMVars) (Some depth)
+              (theorem, cid, variant, mfs)
+          with _ -> None
+        in
+        (match witness with
+         | Some e ->
+             let s = Format.asprintf "%a" (P.fmt_ppr_cmp_exp cD cG P.l0) e in
+             Printf.sprintf "{\"ok\":true,\"proof\":\"%s\"}" (json_escape s)
+         | None -> "{\"ok\":false,\"reason\":\"no-proof\"}")
+  with e ->
+    Printf.sprintf "{\"ok\":false,\"reason\":\"exn\",\"err\":\"%s\"}"
+      (json_escape (Printexc.to_string e))
+
+(* ----- THE ADJUDICATION ORACLE --------------------------------------------
+   `%:checkinhole` answers "is this well-typed HERE". It cannot distinguish
+   "reconstruction will determine this object" from "this is a real, unmet proof
+   obligation", because it elaborates with no declaration-level obligation. That
+   is exactly what made a `_` candidate a yes-machine that closed every leaf with
+   `[ |- _]` while failing at declaration level (master plan entry 72).
+
+   Beluga's unifier already computes the distinction, and `Unify.StdTrail` exposes
+   it: resetting the global constraint store before a command and querying it
+   afterwards yields the three-valued verdict a search needs, at COMMAND COST and
+   with NO declaration reload:
+
+     ok = false                     -> FAILED     (rigid clash / type error)
+     ok, postponed, force raises    -> FAILED     (bottom; constraints unsatisfiable)
+     ok, postponed after forcing    -> POSTPONED  (satisfiable, awaiting information)
+     ok, no constraints             -> SOLVED     (fully determined)
+
+   ⛔ No core command is added or modified — this wraps an existing one, exactly
+   like `type_at_json` above. *)
+let adjudicate_json session input =
+  Unify.StdTrail.resetGlobalCnstrs ();
+  let (raw, escaped) = run_command_status session input in
+  (* ⛔ `run_command_status`'s boolean means "no exception ESCAPED", not "the command
+     succeeded". `%:checkinhole` catches its own errors and PRINTS `FAIL ...`, so that
+     boolean is true even for nonsense — the smoke test returned SOLVED for
+     `__nonsense__`. Read the command's own output. *)
+  let ran =
+    escaped
+    && String.length raw >= 2
+    && String.equal (String.sub (String.trim raw) 0 2) "OK"
+  in
+  let postponed = Unify.StdTrail.unresolvedGlobalCnstrs () in
+  let force_ok =
+    if not postponed then true
+    else (try Unify.StdTrail.forceGlobalCnstr (); true with _ -> false)
+  in
+  let still =
+    if not postponed then false
+    else (try Unify.StdTrail.unresolvedGlobalCnstrs () with _ -> true)
+  in
+  (* leave the store clean so the next command starts from a known state *)
+  Unify.StdTrail.resetGlobalCnstrs ();
+  let verdict =
+    if not ran then "FAILED"
+    else if not force_ok then "FAILED"
+    else if still then "POSTPONED"
+    else "SOLVED"
+  in
+  Printf.sprintf
+    "{\"verdict\":\"%s\",\"ok\":%b,\"postponed\":%b,\"forceOk\":%b,\"still\":%b,\"raw\":\"%s\"}"
+    verdict ran postponed force_ok still (json_escape raw)
+
 (* Decl-level reconstructed type. Looks up a top-level declaration by NAME in the
    global store (populated by the last successful load) and pretty-prints its
    elaborated type with implicit arguments expanded. Returns {ok,type}.
@@ -394,6 +502,19 @@ let () =
           live-intel's runGetType. *)
        method ideTypeAtJson line col =
           Js.string (type_at_json !session line col)
+
+       (* Run any interpreter command with the unification constraint store reset
+          first, and report the three-valued adjudication verdict
+          SOLVED / POSTPONED / FAILED alongside the command's own output.
+          Intended use: `%:checkinhole H (c ?u1 ... ?un)`. *)
+       method ideAdjudicate input =
+          Js.string (adjudicate_json !session (Js.to_string input))
+
+       (* THE BASELINE. Runs Harpoon's own automatic prover
+          (`--auto-invert-solve` / `--inductive-auto-solve`) on the first open
+          subgoal of the currently-loaded program. variant: 1 = invert, 2 = inductive. *)
+       method ideHarpoonAuto depth variant =
+          Js.string (harpoon_auto_json depth variant)
 
        (* Decl-level reconstructed type for NAME, with implicits expanded:
           {ok, type}. Reads the global store from the last committed load. *)
