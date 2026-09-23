@@ -913,30 +913,46 @@ let synPatRefine loc caseT (cD, cD') t (tau_s, tau_p) =
        raise (Check.Comp.Error (loc, Check.Comp.SynMismatch (cD, (tau_s', Whnf.m_id), (tau_p', Whnf.m_id))))
   in
   let unifyScrutinee tau_p' t1 t1t =
+    (* A type ascription constrains a pattern's TYPE - already checked by
+       unifyPatternType above - but not its SHAPE, so look through any number
+       of them before deciding whether there is an index to refine. *)
+    let rec strip_ann = function
+      | Int.Comp.PatAnn (_, pat, _, _) -> strip_ann pat
+      | pat -> pat
+    in
     match caseT with
     | DataObj -> () (* not dependent pattern matching; nothing to do *)
-    | IndexObj (Int.Comp.(PatMetaObj (_, mC_p) | PatAnn (_, PatMetaObj (_, mC_p), _, _)), mC) ->
-       let mC_p = Whnf.cnormMetaObj (mC_p, Whnf.m_id) in
-       (* tau_p' _has_ to be a box type if caseT is an IndexObj  *)
-       let Int.Comp.TypBox (_, mT) = tau_p' in
-       dprintf
-         begin fun p ->
-         p.fmt "[synPatRefine] @[<v>unifying scrutinee and pattern:\
-                @,mC    = @[%a@]\
-                @,mC_p  = @[%a@]\
-                @,cD    = @[%a@]@]"
-           P.(fmt_ppr_cmp_meta_obj cD l0) mC
-           P.(fmt_ppr_cmp_meta_obj cD' l0) mC_p
-           P.(fmt_ppr_lf_mctx l0) cD
-         end;
-       try
-         Unify.unifyMetaObj Int.LF.Empty
-           (Whnf.cnormMetaObj (mC, t), t1)
-           (mC_p, t1t)
-           (mT, Whnf.m_id)
-       with
-       | Unify.Failure msg ->
-          throw loc (ImpossiblePattern (cD, mC_p, mC))
+    | IndexObj (pat, mC) ->
+       begin match strip_ann pat with
+       (* A variable pattern matches anything, so it refines no index: there is
+          nothing to unify, exactly as in the DataObj case. *)
+       | Int.Comp.(PatVar _ | PatFVar _) -> ()
+       | Int.Comp.PatMetaObj (_, mC_p) ->
+          let mC_p = Whnf.cnormMetaObj (mC_p, Whnf.m_id) in
+          (* tau_p' _has_ to be a box type if the pattern is a meta-object *)
+          let Int.Comp.TypBox (_, mT) = tau_p' in
+          dprintf
+            begin fun p ->
+            p.fmt "[synPatRefine] @[<v>unifying scrutinee and pattern:\
+                   @,mC    = @[%a@]\
+                   @,mC_p  = @[%a@]\
+                   @,cD    = @[%a@]@]"
+              P.(fmt_ppr_cmp_meta_obj cD l0) mC
+              P.(fmt_ppr_cmp_meta_obj cD' l0) mC_p
+              P.(fmt_ppr_lf_mctx l0) cD
+            end;
+          begin
+            try
+              Unify.unifyMetaObj Int.LF.Empty
+                (Whnf.cnormMetaObj (mC, t), t1)
+                (mC_p, t1t)
+                (mT, Whnf.m_id)
+            with
+            | Unify.Failure msg ->
+               throw loc (ImpossiblePattern (cD, mC_p, mC))
+          end
+       | _ -> throw loc PatternMobj
+       end
   in
   let t1 = Ctxsub.mctxToMSub cD' in (* . |- t1 : cD' *)
   let t1t = Whnf.mcomp t t1 in (* . |- t1t : cD  since  cD' |- t : cD  and  t1t = t mcomp t1 *)
