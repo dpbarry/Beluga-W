@@ -1,3 +1,8 @@
+; The js_of_ocaml build: the fallback for a browser that cannot run the Wasm builds
+; below (BelJar's default is beluga_web_wasm_cps). _rebuild/rebuild.ps1 builds it in
+; dune's release profile: whole program, no source map. The double-translation build
+; (beluga_web_dt, BelJar's retired "Fast" mode) was removed on 2026-10-16.
+
 (executable
  (name beluga_web)
  (modules beluga_web)
@@ -15,15 +20,20 @@
  (preprocess
   (pps js_of_ocaml-ppx)))
 
+; The wasm_of_ocaml builds (docs/wasm-runtime.md in BelJar). Beluga performs no
+; effects, so beluga_web_wasm is direct style with effects disabled and needs no
+; JSPI. beluga_web_wasm_cps, BelJar's default, is CPS for the stack: under Wasm tail
+; calls a continuation does not grow it. Whole program, no source map.
+
 (rule
- (target beluga_web_dt.ml)
+ (target beluga_web_wasm.ml)
  (deps beluga_web.ml)
  (action (copy %{deps} %{target})))
 
 (executable
- (name beluga_web_dt)
- (modules beluga_web_dt)
- (modes js)
+ (name beluga_web_wasm)
+ (modules beluga_web_wasm)
+ (modes wasm)
  (libraries
   js_of_ocaml
   support
@@ -31,8 +41,34 @@
   beluga_syntax
   beluga_parser
   harpoon_core)
- (js_of_ocaml
-  (flags (:standard --disable use-js-string --effects=double-translation)))
+ (wasm_of_ocaml
+  (compilation_mode whole_program)
+  (sourcemap no)
+  (flags (:standard --effects=disabled)))
+ (flags (:standard -w -53))
+ (preprocess
+  (pps js_of_ocaml-ppx)))
+
+(rule
+ (target beluga_web_wasm_cps.ml)
+ (deps beluga_web.ml)
+ (action (copy %{deps} %{target})))
+
+(executable
+ (name beluga_web_wasm_cps)
+ (modules beluga_web_wasm_cps)
+ (modes wasm)
+ (libraries
+  js_of_ocaml
+  support
+  beluga
+  beluga_syntax
+  beluga_parser
+  harpoon_core)
+ (wasm_of_ocaml
+  (compilation_mode whole_program)
+  (sourcemap no)
+  (flags (:standard --effects=cps)))
  (flags (:standard -w -53))
  (preprocess
   (pps js_of_ocaml-ppx)))
