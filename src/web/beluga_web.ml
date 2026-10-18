@@ -94,7 +94,7 @@ let create () =
   let state = Command.create_initial_state ~ppf () in
   { state; buf; ppf; scan_pos }
 
-let normalize_exn e =
+let normalize_exn e = (* the JS build's overflow; under Wasm it escapes OCaml (_rebuild/RECIPE.md) *)
   match Js_error.of_exn e with
   | Some err ->
     (try if Js_error.name err = "RangeError" then Stack_overflow else e
@@ -111,6 +111,16 @@ let load_from_string session content =
      a poisoned session. Core resets it at comparable entry points
      (command.ml, interactive.ml); do the same per load. *)
   Unify.StdTrail.resetGlobalCnstrs ();
+  (* So does the logic engine's query queue. A [--query] is queued when
+     reconstruction reaches it, and only [Logic.runLogic], at the end of a load
+     that succeeded, runs and clears it. A file that fails after its query left
+     it queued, and the next load ran it against the new store: a one-line
+     signature died with [DynArray.Invalid_arg], a file that had the cid had
+     the old query answered beside its own (tests/test-beluga-stale-query.mjs).
+     [Logic.prepare] clears the queue and indexes the store, so the store is
+     cleared first and nothing is indexed; the load clears it again itself. *)
+  Store.clear ();
+  Logic.prepare ();
   try
     ignore
       (Command.load_from_string session.state ~virtual_filename:"input.bel"
@@ -531,8 +541,8 @@ let () =
           Js.string !committed_fingerprint
 
        (* Batch elaboration: runs %:get-type at each JS-supplied use-site in one
-          WASM call. Tier B (upstream %:elaborate-decl / Typeinfo walk) can replace
-          the internal loop when available in Beluga core. *)
+          call into the runtime. Tier B (upstream %:elaborate-decl / Typeinfo walk)
+          can replace the internal loop when available in Beluga core. *)
        method ideElaborateDecl _start_line _end_line positions_spec =
           let spec = Js.to_string positions_spec in
           Js.string (elaborate_decl_json !session spec)
